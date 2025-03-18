@@ -1,6 +1,4 @@
 <?php
-require_once $_SERVER['DOCUMENT_ROOT'] . '/acc/classes/constants.php';
-
 /**
  * BBCode to HTML converter
  *
@@ -20,6 +18,38 @@ class BBCode {
         $escapedCode = preg_replace('/\[\/?([^\]]+)\]/', '&#91;$1&#93;', $match[1]);
 
         return "<pre style='background-color:grey;color:white'><code>$escapedCode</code><h6> Code is user-generated via &#91;code&#93;content&#91;/code&#93;</h6></pre>";
+    };
+
+
+     // Replace [email]...[/email] with <a href="mailto:...">...</a>
+    $this->bbcode_table["/\[email\](.*?)\[\/email\]/is"] = function ($match) {
+      return "<a href=\"mailto:$match[1]\">htmlspecialchars($match[1])</a>"; 
+    };
+
+
+    // Replace [email=someone@somewhere.com]An e-mail link[/email] with <a href="mailto:someone@somewhere.com">An e-mail link</a>
+    $this->bbcode_table["/\[email=(.*?)\](.*?)\[\/email\]/is"] = function ($match) {
+      return "<a href=\"mailto:$match[1]\">htmlspecialchars($match[2])</a>"; 
+    };
+
+    
+    $this->bbcode_table["/(?<!\[url\])(?<!\[img\])(?<!\[)(?<!&)(@|#)([a-zA-Z0-9_]+)(?!\])(?!;)(?!<)(?!>)(?!:)/"] = function ($match) {
+        if ($match[1] === '@') {
+            $conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
+
+            $username = $conn->real_escape_string($match[2]);
+            $matchResult = $conn->query("SELECT * FROM users WHERE username = '$username' LIMIT 1");
+            $matchRow = $matchResult->fetch_assoc();
+
+            $user = $matchRow['id'] ?: '404-not-found';
+            return "<a href=\"/user/{$user}\" title='@<USERNAME> mentions someone.'><b>@{$username}</b></a>";
+
+        } elseif ($match[1] === '#') {
+            return "<a href=\"/list.php?q={$match[2]}\"><b>#{$match[2]}</b></a>";
+        } else {
+            //return "<a href=\"{$match[1]}\"><b>{$match[1]}</b></a>";
+            return "[url]{$match[1]}[/url]";
+        }
     };
 
 
@@ -76,19 +106,6 @@ class BBCode {
       return '<span style="color:'. $match[1] . ';">' . $match[2] . '</span>';
     };
 
-
-    // Replace [email]...[/email] with <a href="mailto:...">...</a>
-    $this->bbcode_table["/\[email\](.*?)\[\/email\]/is"] = function ($match) {
-      return "<a href=\"mailto:$match[1]\">$match[1]</a>"; 
-    };
-
-
-    // Replace [email=someone@somewhere.com]An e-mail link[/email] with <a href="mailto:someone@somewhere.com">An e-mail link</a>
-    $this->bbcode_table["/\[email=(.*?)\](.*?)\[\/email\]/is"] = function ($match) {
-      return "<a href=\"mailto:$match[1]\">$match[2]</a>"; 
-    };
-
-
     // Replace [url]...[/url] with <a href="...">...</a>
     $this->bbcode_table["/\[url\](.*?)\[\/url\]/is"] = function ($match) {
         $url = "http://go.gr8brik.rf.gd/index.php?uri=" . base64_encode($match[1]) . "&ref=gr8brik.webapp";
@@ -104,7 +121,7 @@ class BBCode {
 
     // Replace [img]...[/img] with <img src="..."/>
     $this->bbcode_table["/\[img\](.*?)\[\/img\]/is"] = function ($match) {
-      return "<img src=\"$match[1]\"/>"; 
+      return "<br /><img src=\"$match[1]\"/>"; 
     };
     
     
@@ -142,20 +159,6 @@ class BBCode {
         return "<iframe class=\"youtube-player\" type=\"text/html\" width=\"640\" height=\"385\" src=\"$iframeUrl\" frameborder=\"0\"></iframe>";
     };
 
-    /*$this->bbcode_table["/(?<!\[)(?<!&)(@|#)([a-zA-Z0-9_]+)(?!\])(?!;)/"] = function ($match) {
-        if ($match[1] === '@') {
-            return "<a href=\"/@{$match[2]}\">@{$match[2]}</a>";
-        } else {
-            return "<a href=\"/list.php?q={$match[2]}\">#{$match[2]}</a>";
-        }
-    };*/
-    $this->bbcode_table["/(?<!\[)(?<!&)(@|#)([a-zA-Z0-9_]+)(?!\])(?!;)(?!<)(?!>)(?!:)/"] = function ($match) {
-        if ($match[1] === '@') {
-            return "<a href=\"/@{$match[2]}\">@{$match[2]}</a>";
-        } else {
-            return "<a href=\"/list.php?q={$match[2]}\">#{$match[2]}</a>";
-        }
-    };
 
   }
   
