@@ -1,5 +1,4 @@
 <?php
-header('Content-Type: application/json');
 error_reporting(0);
 require_once $_SERVER['DOCUMENT_ROOT'] . '/ajax/user.php';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/ajax/time.php';
@@ -9,7 +8,113 @@ $bbcode = new BBCode;
 $conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME2);
 $conn2 = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
 
-if($_GET['fetch']) {
+if (isset($_POST['save_build'])) {
+    header('Content-Type: application/json');
+
+    $modelJson = $_POST['creation'];
+
+    if (empty($modelJson)) {
+        header("HTTP/1.1 400 Bad Request");
+        echo json_encode(['error' => "No model data received."]);
+        exit;
+    }
+
+    $decoded_json = json_decode($modelJson, true);
+    if ($modelJson === null && json_last_error() !== JSON_ERROR_NONE) {
+        header("HTTP/1.1 400 Bad Request");
+        echo json_encode(['error' => "Invalid creation format."]);
+        exit;
+    }
+
+    if (!isset($token['user'])) {
+        header("HTTP/1.1 401 Unauthorized");
+        echo json_encode(['error' => "Please login to save models."]);
+        exit;
+    }
+
+    $user = $token['user'];
+
+    $sql = "SELECT * FROM users WHERE id = '$user'";
+    $result = $conn2->query($sql);
+
+    if ($result->num_rows < 0) {
+        header("HTTP/1.1 401 Unauthorized");
+        echo json_encode(['error' => "Error fetching user account."]);
+        exit;
+    }
+
+    $row = $result->fetch_assoc();
+
+    $sql2 = "SELECT * FROM bans WHERE user = '$user' LIMIT 1";
+    $result2 = $conn2->query($sql2);
+
+    if ($result2->num_rows > 0) {
+        $row2 = $result2->fetch_assoc();
+        if ($row2['end_date'] >= time()) {
+            header("HTTP/1.0 403 Forbidden");
+            echo json_encode(['error' => "User account has been banned, as such you cannot post new models."]);
+            exit;
+        }
+    }
+
+    $file_id = bin2hex(random_bytes(16));
+    $file_name = "../cre/" . $file_id . ".json";
+    $db_file_name = $file_id . ".json";
+    $desc = htmlspecialchars($_POST['desc']);
+    $name = htmlspecialchars($_POST['name']);
+    $date = date("Y-m-d H:i:s");
+    $screenshot_path = "/img/no_image.png";
+
+    if (!empty($_POST['screenshot'])) {
+        $screenshot_data = $_POST['screenshot'];
+
+        if (strpos($screenshot_data, 'data:image/png;base64,') === 0) {
+            $screenshot_data = base64_decode(substr($screenshot_data, strlen('data:image/png;base64,')));
+            $screenshot_path = "../cre/" . bin2hex(random_bytes(16)) . ".png";
+
+            if (!file_put_contents($screenshot_path, $screenshot_data)) {
+                header("HTTP/1.1 500 Internal Server Error");
+                echo json_encode(['error' => "Failed to save screenshot."]);
+                exit;
+            }
+        }
+    }
+
+    if (file_put_contents($file_name, $modelJson) === false) {
+        header("HTTP/1.1 500 Internal Server Error");
+        echo json_encode(['error' => "Failed to save model JSON to filesystem."]);
+        exit;
+    }
+
+    if ($conn->connect_error) {
+        header("HTTP/1.1 500 Internal Server Error");
+        echo json_encode(['error' => "Database connection failed."]);
+        exit;
+    }
+
+    $stmt = $conn->prepare("INSERT INTO model (user, model, description, name, date, screenshot) VALUES (?, ?, ?, ?, ?, ?)");
+    if (!$stmt) {
+        header("HTTP/1.1 500 Internal Server Error");
+        echo json_encode(['error' => "Failed to save your creation to the database."]);
+        exit;
+    }
+    $stmt->bind_param("isssss", $user, $db_file_name, $desc, $name, $date, $screenshot_path);
+
+    if (!$stmt->execute()) {
+        header("HTTP/1.1 500 Internal Server Error");
+        echo json_encode(['error' => "Failed to save your creation to the database."]);
+        exit;
+    }
+
+    $_SESSION['last_request'] = time();
+    $stmt->close();
+    $conn->close();
+
+    echo json_encode(['success' => "Your creation was saved successfully!", 'screenshot' => $screenshot_path]);
+    exit;
+}
+
+/*if($_GET['fetch']) {
     if ($conn->connect_error) {
         exit($conn->connect_error);
     }
@@ -99,9 +204,156 @@ if($_GET['fetch']) {
     ]);
     header("HTTP/1.0 200 OK");
     exit;
+}*/
+
+
+function fetch_build($model_id, $csrf) {
+    global $users_row;
+    global $tokendata;
+    global $token;
+    global $conn;
+    global $conn2;
+
+    require_once $_SERVER['DOCUMENT_ROOT'] . '/com/bbcode.php';
+    $bbcode = new BBCode();
+
+    if (empty($csrf) || $csrf != $_SESSION['csrf']) {
+        return json_encode([
+            "message" => 'No CSRF token provided, or it is invalid!',
+            "error" => 'INVALID_CSRF'
+        ]);
+    }
+    
+    if ($conn->connect_error) {
+        exit($conn->connect_error);
+    }
+
+    if (!is_numeric($model_id)){
+        return json_encode([
+            "message" => 'Invalid ID provided for creation',
+            "error" => 'INVALID_ID'
+        ]);
+    }
+
+    $sql = "SELECT * FROM model WHERE id = '$model_id' AND removed = '0'";
+    $result = $conn->query($sql);
+    $row2 = $result->fetch_assoc();
+
+    $userid = $row2['user'];
+    $model = $row2['model'];
+    $description = $row2['description'];
+    $name = $row2['name'];
+    $date = $row2['date'];
+    $screenshot = $row2['screenshot'];
+    $views = $row2['views'];
+    $isRemoved = $row2['removed'];
+    $decoded_description = htmlentities($description, ENT_QUOTES, 'UTF-8');
+       
+    if ($conn2->connect_error) {
+        exit($conn2->connect_error);
+    }
+
+    if($result->num_rows === 0 || empty($row2['id'])) {
+        header('HTTP/1.0 500 Internal Server Error');
+        return json_encode([
+            "message" => 'Creation not found',
+            "error" => '404'
+        ]);
+    }
+
+    $sql = "SELECT * FROM users WHERE id = $userid";
+    $result = $conn2->query($sql);
+    $row = $result->fetch_assoc();
+
+    $username = $row['username'];
+    $model_admin = $row['admin'];
+    $model_verified = $row['verified'];
+    
+    $result3 = $conn2->query("SELECT * FROM bans WHERE user = $userid");
+    $row3 = $result3->fetch_assoc();
+
+    while ($row3 = $result3->fetch_assoc()) {
+        if ($result3->num_rows > 0 && $row3['end_date'] >= time()) {
+            header('HTTP/1.0 500 Internal Server Error');
+            return json_encode([
+                "message" => 'Creation could not load as the account that made it has been suspended',
+                "error" => 'ACC_BANNED'
+            ]);
+        }
+    }
+
+    if(isset($token['user'])) {
+        $id = $token['user'];
+
+        $sql = "SELECT * FROM user_blocks WHERE userid = ? AND profileid = ? LIMIT 1";
+        $stmt = $conn2->prepare($sql);
+        $stmt->bind_param("ii", $userid, $id);
+        $stmt->execute();
+        $result4 = $stmt->get_result();
+        $stmt->close();
+
+        if ($result4->num_rows > 0) {
+            header("HTTP/1.0 403 Forbidden");
+            return json_encode([
+                "message" => htmlspecialchars($row['username']) . " has blocked you.",
+            ]);
+        }
+
+        $find_votes = $conn->query("SELECT * FROM votes WHERE user = '$id' AND creation = '$model_id' LIMIT 1");
+        $vote_results = $find_votes->fetch_assoc();
+        if ($find_votes->num_rows > 0) {
+            $voted = true;
+        } else {
+            $voted = false;
+        }
+    }
+
+    if (!isset($_SESSION['viewed_creation_ids'])) {
+        $_SESSION['viewed_creation_ids'] = [];
+    }
+
+    if (!in_array($model_id, $_SESSION['viewed_creation_ids'])) {
+        $view_stmt = $conn->prepare("UPDATE model SET views = views + 1 WHERE id = ?");
+        $view_stmt->bind_param("i", $model_id);
+        $view_stmt->execute();
+        $_SESSION['viewed_creation_ids'][] = $model_id;
+    }
+
+    header("HTTP/1.0 200 OK");
+    $message = "OK";
+    $data = [
+        'userid' => $row2['user'], 
+        'modelid' => $model_id, 
+        'model' => $row2['model'], 
+        'description' => $row2['description'], 
+        'name' => $row2['name'], 
+        'date' => $row2['date'], 
+        'screenshot' => $row2['screenshot'], 
+        'views' => $views, 
+        'isRemoved' => $row2['removed'], 
+        'voted' => $voted, 
+        'likes' => $count_row['vote_count'], 
+        'decoded_description' => htmlentities($description, ENT_QUOTES, 'UTF-8'), 
+        'username' => $row['username'], 
+        'model_admin' => $row['admin'], 
+        'model_verified' => $row['verified'], 
+        'myUserId' => $token['user'] ?: false, 
+        'message' => $message
+    ];
+    //return json_encode($data);
+    return json_encode($data);
 }
 
-if($_GET['build_comments']) {
+if(isset($_GET['fetch'])) {
+    header('Content-Type: application/json');
+    $model_id = htmlspecialchars((int)$_GET['buildId']);
+    $data = fetch_build($model_id, $_SESSION['csrf']);
+    exit($data);
+}
+
+/*if($_GET['build_comments']) {
+    header('Content-Type: application/json');
+
     $model_id = $_GET['buildId'];
 	$conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME2);
 	if ($conn->connect_error) {
@@ -163,7 +415,6 @@ if($_GET['build_comments']) {
             'username' => $conn2->real_escape_string(htmlspecialchars($userRow['username'])), 
             'comment' => $bbcode->toHTML(htmlspecialchars($row['comment'])), 
             'date' => time_ago(date('Y-m-d H:i:s', $row['date'])), 
-            'valid' => $valid_comment, 
             'count' => $count, 
             'votes' => $comment_votes, 
             'voted' => $is_voted, 
@@ -176,9 +427,127 @@ if($_GET['build_comments']) {
     header("HTTP/1.0 200 OK");
     $comResult->free();
     exit;
+} */
+
+function fetch_comments($model_id, $csrf) {
+    global $users_row;
+    global $tokendata;
+    global $token;
+    global $loggedin;
+    global $conn;
+    global $conn2;
+
+    require_once $_SERVER['DOCUMENT_ROOT'] . '/com/bbcode.php';
+    $bbcode = new BBCode();
+
+    if (empty($csrf) || $csrf != $_SESSION['csrf']) {
+        return json_encode([
+            "message" => 'No CSRF token provided, or it is invalid!',
+            "error" => 'INVALID_CSRF'
+        ]);
+    }
+
+    $id = $token['user'];
+
+	$sql = "SELECT DISTINCT * FROM comments WHERE model = $model_id ORDER BY id ASC";
+	$comResult = $conn->query($sql);
+
+    $count_result = $conn->query("SELECT COUNT(*) as reply_count FROM comments WHERE model = $model_id");
+    $count_row = $count_result->fetch_assoc();
+
+    $count = 0;
+    $comments = [];
+	while ($row = $comResult->fetch_assoc()) {
+        $comment_id = $row['id'];
+
+        $voted_query = $conn->query("SELECT * FROM comment_votes WHERE comment_id = '$comment_id'");
+        $comment_votes = 0;
+        $is_voted = false;
+        while ($voted_row = $voted_query->fetch_assoc()) {
+            $comment_votes++;
+            if ($loggedin === true) {
+                if ((int)$voted_row['user_id'] === (int)$id) {
+                    $is_voted = true;
+                }
+            }
+        }
+        
+        $c_user = $row['user'];
+        $userResult = $conn2->query("SELECT * FROM users WHERE id = $c_user");
+        $userRow = $userResult->fetch_assoc();
+
+        $banResult = $conn2->query("SELECT * FROM bans WHERE user = '$c_user' LIMIT 1");
+        $banRow = $banResult->fetch_assoc();
+
+        $youBlocked = false;
+        $theyBlocked = false;
+        $blockResult = $conn2->query("SELECT * FROM user_blocks WHERE (userid = '$c_user' AND profileid = '$id') OR (userid = '$id' AND profileid = '$c_user')");
+        if ($blockResult && $blockResult->num_rows > 0) {
+            while ($row = $blockResult->fetch_assoc()) {
+                if ($row['userid'] == $id && $row['profileid'] == $c_user) {
+                    $youBlocked = true;
+                } elseif ($row['userid'] == $c_user && $row['profileid'] == $id) {
+                    $theyBlocked = true;
+                }
+            }
+            if ($youBlocked && $theyBlocked) {
+                $message = "You blocked @" . $userRow['username'] . ", and they blocked you.";
+            } elseif ($youBlocked) {
+                $message = "You blocked @" . $userRow['username'];
+            } elseif ($theyBlocked) {
+                $message = "You're blocked from @" . $userRow['username'];
+            }
+            continue;
+        }
+
+        if ($banResult->num_rows > 0 && $banRow['end_date'] >= time()) {
+            continue;
+        }
+
+        if (!empty($userRow['deactive'] || $userResult->num_rows < 0)) {
+            continue;
+        }
+
+        if (!is_numeric($row['date'])) {
+            $row['date'] = time();
+        }
+
+        $count++;
+
+        header("HTTP/1.0 200 OK");
+        $comments[] = [
+            'id' => $comment_id,
+            'userid' => $c_user,
+            'user_admin' => htmlspecialchars($userRow['admin']),
+            // if you want me to add this code snippet that does nothing ask me
+            // 'username' => empty(htmlspecialchars($userRow['username'])) ? 'Deleted User' : htmlspecialchars($userRow['username']),
+            'username' => htmlspecialchars($userRow['username']),
+            'user_about' => empty(htmlspecialchars($userRow['description'])) ? 'No description for this user.' : htmlspecialchars($userRow['description']),
+            'comment' => $bbcode->toHTML(nl2br(htmlspecialchars($row['comment']))),
+            'date' => time_ago(date('Y-m-d H:i:s', $row['date'])),
+            'votes' => $comment_votes,
+            'voted' => $is_voted,
+            'loggedin' => $loggedin,
+            'message' => $message
+        ];
+    }
+    $comResult->free();
+    return json_encode($comments); 
+
+    /*echo json_encode($comments);
+    exit; */
+}
+
+if(isset($_GET['build_comments'])) {
+    header('Content-Type: application/json');
+    $model_id = htmlspecialchars((int)$_GET['buildId']);
+    $comment_data = fetch_comments($model_id, $_SESSION['csrf']);
+    exit($comment_data);
 }
 
 if(isset($_POST['comment'])){
+    header('Content-Type: application/json');
+
 	$comment = $_POST['commentbox'];
     $model_id = $_POST['buildId'];
 	$conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME2);
@@ -243,6 +612,48 @@ if(isset($_POST['comment'])){
     $stmt2->close();
 }
 
+function delete_build($model_id) {
+    global $conn, $loggedin, $users_row;
+
+    $sql = "SELECT * FROM model WHERE id = ? AND removed = 0";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("i", $model_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $build_row = $result->fetch_assoc();
+
+    if ($result->num_rows === 0) {
+        return 'Error: Creation not found';
+    }
+
+    if (!$loggedin || $users_row['id'] !== $build_row['user']) {
+        return 'Error: Unauthorized';
+    }
+
+    $model_path = '../cre/' . $build_row['model'];
+    if (file_exists($model_path)) {
+        unlink($model_path);
+    }
+
+    $screenshot_path = $build_row['screenshot'];
+    if (file_exists($screenshot_path)) {
+        unlink($screenshot_path);
+    }
+
+    $sql = "DELETE FROM model WHERE id = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("i", $model_id);
+    $stmt->execute();
+
+    return 'Success';
+}
+
+if(isset($_GET['delete_build'])) {
+    $model_id = $_GET['model_id'];
+    $delete = delete_build($model_id);
+    return $delete;
+}
+
 if(isset($_GET['picture'])) {
     $model_id = $_GET['id'];
     $sql = "SELECT screenshot FROM model WHERE id = '$model_id' AND removed = '0'";
@@ -289,6 +700,8 @@ if ($loggedin === true) {
     }
 
     if (isset($_POST['upvote'])) {
+        header('Content-Type: application/json');
+
         if (!isset($_POST['model_id']) || !is_numeric($_POST['model_id'])) {
             echo json_encode(['error' => 'invalid model']);
             exit;
@@ -306,6 +719,8 @@ if ($loggedin === true) {
     }
 
     if (isset($_POST['upvote_comment'])) {
+        header('Content-Type: application/json');
+
         if (!isset($_POST['comment_id']) || !is_numeric($_POST['comment_id'])) {
             echo json_encode(['error' => 'invalid comment']);
             exit;
@@ -337,6 +752,8 @@ if ($loggedin === true) {
     }
 
     if (isset($_POST['downvote_comment'])) {
+        header('Content-Type: application/json');
+
         if (!isset($_POST['comment_id']) || !is_numeric($_POST['comment_id'])) {
             echo json_encode(['error' => 'invalid comment']);
             exit;

@@ -1,12 +1,12 @@
 <?php
-header('Content-Type: application/json');
-error_reporting(0);
+//error_reporting(0);
 include $_SERVER['DOCUMENT_ROOT'] . '/ajax/user.php';
 include $_SERVER['DOCUMENT_ROOT'] . '/com/bbcode.php';
 include $_SERVER['DOCUMENT_ROOT'] . '/ajax/time.php';
 $bbcode = new BBCode;
 
 if(isset($_GET['follow'])) {
+    header('Content-Type: application/json');
     if(isset($_COOKIE['token']) && $tokendata->num_rows != 0) {
         $profile_id = $_GET['follow'];
 
@@ -114,6 +114,7 @@ if ($conn2->connect_error) {
 }
 
 if(isset($_GET['who_you_follow'])) {
+    header('Content-Type: application/json');
     $followed_by = array();
     $sql = "SELECT DISTINCT profileid FROM follow WHERE userid = '$id' ORDER BY id DESC";
     $result = $conn2->query($sql);
@@ -139,6 +140,7 @@ if(isset($_GET['who_you_follow'])) {
 }
 
 if(isset($_GET['who_follows_you'])) {
+    header('Content-Type: application/json');
     $followed_by = array();
     $sql = "SELECT DISTINCT userid FROM follow WHERE profileid = '$id' ORDER BY id DESC";
     $result3 = $conn2->query($sql);
@@ -164,7 +166,7 @@ if(isset($_GET['who_follows_you'])) {
     exit;
 }
 
-if (isset($_GET['user'])) {
+/*if (isset($_GET['user'])) {
     $profile_id = $_GET['user'];
 
     function defaultError()
@@ -293,7 +295,7 @@ if (isset($_GET['user'])) {
     }
 
     header("HTTP/1.0 200 OK");
-    echo json_encode([
+    $data = [
         'username' => htmlspecialchars($row['username']),
         'admin' => (string)$row['admin'],
         'verified' => (string)$row['verified'],
@@ -309,7 +311,225 @@ if (isset($_GET['user'])) {
         'isLoggedin' => $login,
         'tokenuser' => $id,
         'message' => $message
-    ]);
+    ];
+
+    if (isset($_GET['array']) && $_GET['array'] === 'true') {
+        header("Content-Type: text/plain");
+        echo var_export($data, true);
+    } else {
+        header("Content-Type: application/json");
+        echo json_encode($data);
+    }
     exit;
+} */
+
+function user_blocks($profileid, $userid, $username) {
+    $you = false;
+    $them = false;
+    $message = "OK";
+
+    $block_result = $conn2->query("SELECT * FROM user_blocks WHERE (userid = '$userid' AND profileid = '$profileid') OR (userid = '$profileid' AND profileid = '$userid')");
+
+    if ($block_result && $block_result->num_rows > 0) {
+        while ($row = $block_result->fetch_assoc()) {
+            if ($row['userid'] == $id && $row['profileid'] == $c_user) {
+                $you = true;
+            } elseif ($row['userid'] == $c_user && $row['profileid'] == $id) {
+                $them = true;
+            }
+        }
+
+        if ($youBlocked && $theyBlocked) {
+            $message = "You blocked @" . $username . ", and they blocked you.";
+        } elseif ($you) {
+            $message = "You blocked @" . $username;
+        } elseif ($them) {
+            $message = "You're blocked from @" . $username;
+        }
+
+        return $message;
+    }
+}
+
+function fetch_profile($profile_id, $id, $users_row, $csrf) {
+    require_once $_SERVER['DOCUMENT_ROOT'] . '/com/bbcode.php';
+    $bbcode = new BBCode();
+
+    if (empty($csrf) || $csrf != $_SESSION['csrf']) {
+        return json_encode([
+            "message" => 'No CSRF token provided, or it is invalid!',
+            "error" => 'INVALID_CSRF'
+        ]);
+    }
+
+    if (empty($profile_id) || $profile_id === null) {
+        header("HTTP/1.0 403 Forbidden");
+        return json_encode([
+            "message" => 'No user ID provided!'        
+        ]);
+    }
+
+    $conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
+    if ($conn->connect_error) {
+        exit($conn->connect_error);
+    }
+
+    $sql = "SELECT * FROM users WHERE id = ? LIMIT 1";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("i", $profile_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    if ($result->num_rows === 0 || !$result) {
+        header("HTTP/1.0 403 Forbidden");
+        return json_encode([
+            "message" => 'User not found!',
+            "error" => 'NO_USR'
+        ]);
+    }
+    $row = $result->fetch_assoc();
+    $stmt->close();
+
+    if (!empty($row['deactive'])) {
+        header("HTTP/1.0 403 Forbidden");
+        return json_encode([
+            "message" => htmlspecialchars($row['username']) . ' has deactivated their account.',
+            "error" => 'DEL_ACC'
+        ]);
+    }
+
+    $sql = "SELECT * FROM bans WHERE user = ? LIMIT 1";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("i", $profile_id);
+    $stmt->execute();
+    $result2 = $stmt->get_result();
+    $stmt->close();
+
+    if ($result2->num_rows != 0) {
+        $ban_data = $result2->fetch_assoc();
+        if ($ban_data['end_date'] >= time()) {
+            header("HTTP/1.0 403 Forbidden");
+            return json_encode([
+                "message" => htmlspecialchars($row['username']) . " has been banned until " . gmdate("M d, Y H:i", $ban_data['end_date']) . ". " . htmlspecialchars($ban_data['reason']) . ".",
+                "error" => 'ACC_BAN'
+            ]);
+        }
+    }
+
+    $blockedUser = false;
+    $sql = "SELECT * FROM user_blocks WHERE userid = ? AND profileid = ? LIMIT 1";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("ii", $id, $profile_id);
+    $stmt->execute();
+    $result3 = $stmt->get_result();
+    $stmt->close();
+
+    if ($result3->num_rows > 0) {
+        $blockedUser = true;
+    }
+
+    $sql = "SELECT * FROM user_blocks WHERE userid = ? AND profileid = ? LIMIT 1";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("ii", $profile_id, $id);
+    $stmt->execute();
+    $result3 = $stmt->get_result();
+    $stmt->close();
+
+    if ($result3->num_rows > 0) {
+        header("HTTP/1.0 403 Forbidden");
+        return json_encode([
+            "message" => htmlspecialchars($row['username']) . " has blocked you.",
+            "error" => 'ACC_BLOCKED_LOGIN_USER'
+        ]);
+    }
+    
+    if (!isset($_COOKIE['token']) && !isset($tokendata)) {
+        $isLoggedin = false;
+        header("HTTP/1.0 403 Forbidden");
+        return json_encode([
+            "message" => "Sign in to view " . htmlspecialchars($row['username']) . "'s creations, posts, and comments."        
+        ]);
+    } else {
+        $isLoggedin = true;
+    }
+
+    $conn2 = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME2);
+    if ($conn2->connect_error) {
+        exit($conn2->connect_error);
+    }
+
+    if(file_exists("../acc/users/banners/" . $profile_id . "..jpg")) {
+        $hasBanner = 1;
+    } else {
+        $hasBanner = 0;
+    }
+
+    $stmt = $conn2->prepare("SELECT COUNT(*) as all_models FROM model WHERE user = ?");
+    $stmt->bind_param("s", $profile_id);
+    $stmt->execute();
+    $model_count = $stmt->get_result()->fetch_assoc()['all_models'];
+    $stmt->close();
+
+    $stmt = $conn->prepare("SELECT COUNT(*) as following FROM follow WHERE profileid = ?");
+    $stmt->bind_param("s", $profile_id);
+    $stmt->execute();
+    $followers = $stmt->get_result()->fetch_assoc()['following'];
+    $stmt->close();
+
+    $stmt = $conn->prepare("SELECT COUNT(*) as following FROM follow WHERE userid = ?");
+    $stmt->bind_param("s", $profile_id);
+    $stmt->execute();
+    $following = $stmt->get_result()->fetch_assoc()['following'];
+    $stmt->close();
+
+    $stmt = $conn->prepare("SELECT * FROM follow WHERE userid = ? AND profileid = ?");
+    $stmt->bind_param("ss", $id, $profile_id);
+    $stmt->execute();
+    $result3 = $stmt->get_result();
+    
+    if($result3->num_rows === 0 || !$result3) {
+        $isFollowing = false;
+    } else {
+        $isFollowing = true;
+    }
+    $stmt->close();
+
+    if($id != $profile_id && (string)$users_row['admin'] === '1' && $row['admin'] != '1') {
+        $canBan = true;
+    } else {
+        $canBan = false;
+    }
+
+    if(isset($_GET['user'])) {
+        header("HTTP/1.0 200 OK");
+    }
+    $message = "OK";
+    $data = [
+        'userid' => $row['id'],
+        'username' => htmlspecialchars($row['username']),
+        'admin' => (string)$row['admin'],
+        'verified' => (string)$row['verified'],
+        'description' => isset($row['description']) ? $bbcode->toHTML($row['description']) : '', 
+        'twitter' => htmlspecialchars($row['twitter']),
+        'age' => htmlspecialchars($row['age']),
+        'model_count' => htmlspecialchars($model_count),
+        'followers' => htmlspecialchars($followers),
+        'following' => htmlspecialchars($following),
+        'blockedUser' => (bool)$blockedUser,
+        'hasBanner' => $hasBanner,
+        'isFollowing' => (bool)$isFollowing,
+        'canBan' => $canBan,
+        'isLoggedin' => $isLoggedin,
+        'tokenuser' => $id,
+        'message' => $message
+    ];
+
+    return json_encode($data);
+}
+
+if(isset($_GET['user'])) {
+    header('Content-Type: application/json');
+    $profile_id = htmlspecialchars($_GET['user']);
+    $data = fetch_profile($profile_id, $token['user'], $users_row, $_SESSION['csrf']);
+    echo $data;
 }
 ?>
