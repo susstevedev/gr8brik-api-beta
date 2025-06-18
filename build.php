@@ -57,7 +57,7 @@ if (isset($_POST['save_build'])) {
         }
     }
 
-    $file_id = bin2hex(random_bytes(16));
+    $file_id = uniqid();
     $file_name = "../cre/" . $file_id . ".json";
     $db_file_name = $file_id . ".json";
     $desc = htmlspecialchars($_POST['desc']);
@@ -70,7 +70,7 @@ if (isset($_POST['save_build'])) {
 
         if (strpos($screenshot_data, 'data:image/png;base64,') === 0) {
             $screenshot_data = base64_decode(substr($screenshot_data, strlen('data:image/png;base64,')));
-            $screenshot_path = "../cre/" . bin2hex(random_bytes(16)) . ".png";
+            $screenshot_path = "../cre/" . $file_id . ".png";
 
             if (!file_put_contents($screenshot_path, $screenshot_data)) {
                 header("HTTP/1.1 500 Internal Server Error");
@@ -206,6 +206,12 @@ if (isset($_POST['save_build'])) {
     exit;
 }*/
 
+function truncateStr($mystr) {
+    $truncatedName = substr($mystr, 0, 30);
+    if (strlen($mystr) >= 30) {
+        $truncatedName .= '...';
+    }
+}
 
 function fetch_build($model_id, $csrf) {
     global $users_row;
@@ -265,9 +271,14 @@ function fetch_build($model_id, $csrf) {
     $result = $conn2->query($sql);
     $row = $result->fetch_assoc();
 
-    $username = $row['username'];
-    $model_admin = $row['admin'];
-    $model_verified = $row['verified'];
+    if ($result->num_rows < 0) {
+        $username = "[deleted]";
+        $userid = 0;
+    } else {
+        $username = $row['username'];
+        $model_admin = $row['admin'];
+        $model_verified = $row['verified'];
+    }
     
     $result3 = $conn2->query("SELECT * FROM bans WHERE user = $userid");
     $row3 = $result3->fetch_assoc();
@@ -281,6 +292,9 @@ function fetch_build($model_id, $csrf) {
             ]);
         }
     }
+
+    $count_result = $conn->query("SELECT COUNT(*) as vote_count FROM votes WHERE creation = $model_id");
+    $count_row = $count_result->fetch_assoc();
 
     if(isset($token['user'])) {
         $id = $token['user'];
@@ -322,7 +336,7 @@ function fetch_build($model_id, $csrf) {
     header("HTTP/1.0 200 OK");
     $message = "OK";
     $data = [
-        'userid' => $row2['user'], 
+        'userid' => $userid, 
         'modelid' => $model_id, 
         'model' => $row2['model'], 
         'description' => $row2['description'], 
@@ -334,13 +348,12 @@ function fetch_build($model_id, $csrf) {
         'voted' => $voted, 
         'likes' => $count_row['vote_count'], 
         'decoded_description' => htmlentities($description, ENT_QUOTES, 'UTF-8'), 
-        'username' => $row['username'], 
+        'username' => $username, 
         'model_admin' => $row['admin'], 
         'model_verified' => $row['verified'], 
         'myUserId' => $token['user'] ?: false, 
         'message' => $message
     ];
-    //return json_encode($data);
     return json_encode($data);
 }
 
@@ -500,16 +513,20 @@ function fetch_comments($model_id, $csrf) {
             continue;
         }
 
+        $username = $userRow['username'];
+
         if ($banResult->num_rows > 0 && $banRow['end_date'] >= time()) {
-            continue;
+            $username = "[deleted]";
+            $c_user = 0;
         }
 
         if (!empty($userRow['deactive'] || $userResult->num_rows < 0)) {
-            continue;
+            $username = "[deleted]";
+            $c_user = 0;
         }
 
         if (!is_numeric($row['date'])) {
-            $row['date'] = time();
+            $row['date'] = 0;
         }
 
         $count++;
@@ -519,9 +536,7 @@ function fetch_comments($model_id, $csrf) {
             'id' => $comment_id,
             'userid' => $c_user,
             'user_admin' => htmlspecialchars($userRow['admin']),
-            // if you want me to add this code snippet that does nothing ask me
-            // 'username' => empty(htmlspecialchars($userRow['username'])) ? 'Deleted User' : htmlspecialchars($userRow['username']),
-            'username' => htmlspecialchars($userRow['username']),
+            'username' => htmlspecialchars($username),
             'user_about' => empty(htmlspecialchars($userRow['description'])) ? 'No description for this user.' : htmlspecialchars($userRow['description']),
             'comment' => $bbcode->toHTML(nl2br(htmlspecialchars($row['comment']))),
             'date' => time_ago(date('Y-m-d H:i:s', $row['date'])),
@@ -533,9 +548,6 @@ function fetch_comments($model_id, $csrf) {
     }
     $comResult->free();
     return json_encode($comments); 
-
-    /*echo json_encode($comments);
-    exit; */
 }
 
 if(isset($_GET['build_comments'])) {
@@ -545,16 +557,23 @@ if(isset($_GET['build_comments'])) {
     exit($comment_data);
 }
 
-if(isset($_POST['comment'])){
+if(isset($_POST['comment'])) {
     header('Content-Type: application/json');
 
 	$comment = $_POST['commentbox'];
     $model_id = $_POST['buildId'];
 	$conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME2);
+    $conn2 = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
 
-    if(!isset($_COOKIE['token']) && $tokendata->num_rows === 0) {
+    if(!loggedin()) {
         header("HTTP/1.0 500 Internal Server Error");
-        echo json_encode([ 'error' => 'Please login to comment.' ]);
+        echo json_encode(['error' => 'Please login to comment.']);
+        exit;
+    }
+
+    if($users_row['verify_token'] != NULL) {
+        header("HTTP/1.0 500 Internal Server Error");
+        echo json_encode(['error' => 'Please verify your account to comment.']);
         exit;
     }
 
@@ -575,27 +594,33 @@ if(isset($_POST['comment'])){
     $stmt2 = $conn->prepare($sql);
     $stmt2->bind_param("iiss", $id, $model_id, $comment, $date);
     if ($stmt2->execute()) {
-        if($id != $userid) {
+        $stmt4 = $conn->prepare("SELECT user FROM model WHERE id = ?");
+        $stmt4->bind_param("i", $model_id);
+        $stmt4->execute();
+        $result = $stmt4->get_result();
+        $userid = (int)$result->fetch_assoc()['user'];
+
+        if($token['user'] != $userid) {
             $time = time();
-            $content = $_GET['id'];
+            $content = $model_id;
             $category = 2;
             $sql = "INSERT INTO notifications (user, profile, timestamp, content, category) VALUES (?, ?, ?, ?, ?)";
 
-            $stmt = $conn->prepare($sql);
+            $stmt = $conn2->prepare($sql);
             $stmt->bind_param("iisii", $userid, $id, $time, $content, $category);
             $stmt->execute();
             $stmt->close();
 
             $date = time();
             $sql = "SELECT alert FROM users WHERE id = ?";
-            $stmt3 = $conn->prepare($sql);
+            $stmt3 = $conn2->prepare($sql);
             $stmt3->bind_param("i", $userid);
             $stmt3->bind_result($alert);
             $stmt3->execute();
             $stmt3->close();
 
             $alertnum = $alert + 1;
-            $stmt = $conn->prepare("UPDATE users SET alert = ? WHERE id = ?");
+            $stmt = $conn2->prepare("UPDATE users SET alert = ? WHERE id = ?");
             $stmt->bind_param("si", $alertnum, $userid);
 
             $stmt->close();
@@ -682,6 +707,7 @@ if(isset($_GET['picture'])) {
 
 if ($loggedin === true) {
     $id = $token['user'];
+
     if (isset($_POST['downvote'])) {
         if (!isset($_POST['model_id']) || !is_numeric($_POST['model_id'])) {
             echo json_encode(['error' => 'invalid model']);
@@ -689,7 +715,7 @@ if ($loggedin === true) {
         }
         $model_id = (int)$_POST['model_id'];
 
-        $stmt = $conn->prepare("DELETE FROM votes WHERE user = ? AND creation = ? LIMIT 1");
+        $stmt = $conn->prepare("DELETE FROM votes WHERE user = ? AND creation = ?");
         $stmt->bind_param("ii", $id, $model_id);
         if ($stmt->execute()) {
             echo json_encode(['success' => 'vote removed']);
@@ -703,19 +729,33 @@ if ($loggedin === true) {
         header('Content-Type: application/json');
 
         if (!isset($_POST['model_id']) || !is_numeric($_POST['model_id'])) {
-            echo json_encode(['error' => 'invalid model']);
+            echo json_encode(['error' => 'Model not found!']);
             exit;
         }
-        $model_id = (int) $_POST['model_id'];
+
+        $model_id = (int)$_POST['model_id'];
+
+        $stmt = $conn->prepare("SELECT COUNT(*) FROM votes WHERE creation = ? AND user = ?");
+        $stmt->bind_param("ii", $model_id, $id);
+        $stmt->execute();
+        $stmt->bind_result($vote_count);
+        $stmt->fetch();
+        $stmt->close();
+
+        if ($vote_count > 0) {
+            echo json_encode(['error' => 'You have already liked this!']);
+            exit;
+        }
 
         $stmt = $conn->prepare("INSERT INTO votes (creation, user) VALUES (?, ?)");
         $stmt->bind_param("ii", $model_id, $id);
         if ($stmt->execute()) {
-            echo json_encode(['success' => 'vote added']);
+            echo json_encode(['success' => 'Liked creation with success!']);
         } else {
-            echo json_encode(['error' => 'failed to add vote']);
+            echo json_encode(['error' => 'An unknown error has occured. Please try again later.']);
         }
         $stmt->close();
+        exit;
     }
 
     if (isset($_POST['upvote_comment'])) {

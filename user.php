@@ -12,6 +12,7 @@ if(loggedin() === true) {
     if (rand(1, 10) === 1) {
         //regenerate_session();
         delete_old_sessions();
+        //delete_inactive_users();
     }
 }
 
@@ -249,8 +250,22 @@ function delete_old_sessions() {
     return false;
 }
 
-function loggedin() {
+function delete_inactive_users() {
     global $conn;
+    $stmt = $conn->prepare("DELETE FROM users WHERE deactive IS NOT NULL AND deactive < NOW() - INTERVAL 30 DAY");
+    
+    if ($stmt->execute()) {
+        $stmt->close();
+        return true;
+    } else {
+        error_log("failed to delete inactive users " . $stmt->error);
+        $stmt->close();
+        return false;
+    }
+}
+
+function loggedin() {
+    $conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
 
     if (isset($_COOKIE['token'])) {
         $session_stmt = $conn->prepare("SELECT * FROM sessions WHERE id = ?");

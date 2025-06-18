@@ -49,6 +49,23 @@ if (isset($_GET['revoke']) && isset($_GET['tokenId'])) {
     exit;
 }
 
+if(isset($_GET['verify_account'])) {
+    if(!loggedin() || !isset($users_row)) {
+        echo "User is not authenticated";
+        exit;
+    }
+
+    $userid = $users_row['id'];
+    $conn = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
+
+	$stmt = $conn->prepare("UPDATE users SET verify_token = NULL WHERE id = ?");
+    $stmt->bind_param("i", $userid);
+    if ($stmt->execute()) {
+        header('Location:../list.php');
+        exit;
+    }
+}
+
 function login_user($user, $pwd) {
     $conn = mysqli_connect(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME);
     if (mysqli_connect_errno()) {
@@ -80,7 +97,7 @@ function login_user($user, $pwd) {
         if ($db_hashed_pwd === $row['password']) {
             $userid = $row['id'];
             $login_from = $_SERVER['REMOTE_ADDR'];
-            $tokenid = bin2hex(random_bytes(16));
+            $tokenid = uniqid();
             $time = time();
 
             // For account deactivation (soft deletion until a certain date)
@@ -93,7 +110,7 @@ function login_user($user, $pwd) {
                     }
                 } else {
                     header('HTTP/1.0 500 Internal Server Error');
-                    return ['error' => "This account will be deleted"];
+                    return ['error' => "This account has been deactivated"];
                 }
             }
 
@@ -138,17 +155,17 @@ function register_user($username, $password, $email) {
     if (mysqli_connect_errno()) {
         header('HTTP/1.0 500 Internal Server Error');
         return ['error' => "Database connection failed"];
-        exit;
     }
 
     $username = mysqli_real_escape_string($conn, htmlspecialchars($username));
-    $salt = bin2hex(random_bytes(16));	
-    $password = md5($password . $salt);
-    $email = mysqli_real_escape_string($conn, $email);
+    $email = mysqli_real_escape_string($conn, trim($email ?? ''));
+    $salt = uniqid();	
     $created = date("Y-m-d");
+    $tokenid = uniqid();
+    $login_from = $_SERVER['REMOTE_ADDR'];
 
     if (empty($password) || empty($email) || empty($username)) {
-        header("HTTP/1.0 500 Internal Server Error");
+        header("HTTP/1.0 400 Bad Request");
         if (empty($password)) {
             return ['error' => "Password field is blank"];
         }
@@ -160,27 +177,94 @@ function register_user($username, $password, $email) {
         }
     }
 
+    if(strlen($password) > 255) {
+        header("HTTP/1.0 400 Bad Request");
+        return ['error' => "Password cannot be more than 255 characters"];
+    }
+
+    if(strlen($password) < 4) {
+        header("HTTP/1.0 400 Bad Request");
+        return ['error' => "Password cannot be less than 4 characters"];
+    }
+
+    $password = md5($password . $salt);
+
     // Prevents re-registration for banned or deactivated accounts
+    // Allow list replaced with not allowed list to avoid some issues with school emails
+
+    /*$allowed_domains = array(
+        'gmail.com', 
+        'hotmail.com', 
+        'outlook.com', 
+        'live.com', 
+        'msn.com', 
+        'live.co.uk', 
+        'yahoo.com', 
+        'yahoo.co.uk', 
+        'yahoo.ca', 
+        'proton.me', 
+        'protonmail.com', 
+        'pm.me', 
+        'protonmail.ch', 
+        'apple.com', 
+        'icloud.com', 
+        'me.com', 
+        'gmx.net', 
+        'gmx.com', 
+        'mail.com', 
+        'zoho.com', 
+        'tutanota.com', 
+        'gr8brik.infinityfreeapp.com',
+        'gr8brik.rf.gd'
+    );*/
+
+    $nonallowed_domains = array(
+        'mailinator.com',
+        '10minutemail.com',
+        'guerrillamail.com',
+        'tempmail.com',
+        'trashmail.com',
+        'yopmail.com',
+        'emailondeck.com',
+        'getnada.com',
+        'dispostable.com',
+        'fakeinbox.com'
+    );
+
+    $current_domain = strtolower(explode('@', $email)[1]);
+    if (in_array($current_domain, $nonallowed_domains)) {
+        header('HTTP/1.0 400 Bad Request');
+        return ['error' => "Email address domain is not allowed"];
+    }
+
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        header('HTTP/1.0 400 Bad Request');
+        return ['error' => "Invalid email address format"];
+    }
+
+    if (!checkdnsrr($current_domain, 'MX')) {
+        header('HTTP/1.0 400 Bad Request');
+        return ['error' => "Email address cannot send and/or recive emails"];
+    }
+
     $sql_check = "SELECT id FROM users WHERE username = '$username' UNION ALL SELECT id FROM users WHERE email = '$email'";
     $stmt = mysqli_query($conn, $sql_check);
 
     if (mysqli_num_rows($stmt) > 0) {
-        header("HTTP/1.0 500 Internal Server Error");
+        header("HTTP/1.0 400 Bad Request");
         return ['error' => "Username or email already in use"];
-        exit;
     } else {
-        $sql = "INSERT INTO users (username, password, salt, email, age) VALUES ('$username', '$password', '$salt', '$email', '$created') LIMIT 1";
+        $sql = "INSERT INTO users (username, password, salt, email, age, verify_token) VALUES ('$username', '$password', '$salt', '$email', '$created', '$tokenid') LIMIT 1";
         if (mysqli_query($conn, $sql)) {
             $sql = "SELECT id FROM users WHERE username = '$username'";
             $result = mysqli_query($conn, $sql);
             $row2 = mysqli_fetch_assoc($result);
 
             $userid = $row2['id'];
-            $tokenid = bin2hex(random_bytes(16));
-            $login_from = $_SERVER['REMOTE_ADDR'];
             $time = time();
 
             // Create session token
+            // Evan: Ten years is long enough, right?
             $sql = "INSERT INTO sessions (id, login_from, user, password, timestamp) VALUES ('$tokenid', '$login_from', '$userid', '$password', '$time') LIMIT 1";
             if (mysqli_query($conn, $sql)) {
                 setcookie('token', $tokenid, $time + (60 * 60 * 24 * 400), "/", ".gr8brik.rf.gd");
@@ -203,6 +287,7 @@ if (isset($_POST['register'])) {
 }
 
 // Error if no query params where sent, or no function was ran
+// Do we really need this?
 header('HTTP/1.0 500 Internal Server Error');
 exit(json_encode(["error" => "An error occured. Please try again later."]));
 ?>
