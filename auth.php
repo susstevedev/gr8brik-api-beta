@@ -2,11 +2,10 @@
 /*
     2025 Gr8brik team
     This page, auth.php, is exactly what it sounds like: an authentication system used by Gr8brik
-    TODO: Add prepared statements without using OO (object oriented) MySQLi
 */
 
 header('Content-type: application/json');
-error_reporting(0);
+//error_reporting(0);
 include $_SERVER['DOCUMENT_ROOT'] . '/ajax/user.php';
 
 if (isset($_GET['revoke']) && isset($_GET['tokenId'])) {
@@ -86,19 +85,39 @@ function login_user($user, $pwd) {
     $row = mysqli_fetch_assoc($result);
 
     if (mysqli_num_rows($result) > 0) {
-        // For accounts created before Feb of 2025
-        // I plan to remove this in a later iteration of the website
+        // Hashing
+
+        $db_hashed_pwd = null;
+
         if (!empty($row['salt'])) {
-            $db_hashed_pwd = md5($pwd . $row['salt']);
-        } else {
+            if (md5($pwd . $row['salt']) === $row['password']) {
+                $db_hashed_pwd = md5($pwd . $row['salt']);
+            }
+        } elseif (md5($pwd) === $row['password']) {
             $db_hashed_pwd = md5($pwd);
+        } elseif (password_verify($pwd, $row['password'])) {
+            $db_hashed_pwd = null;
         }
 
-        if ($db_hashed_pwd === $row['password']) {
+        if ($db_hashed_pwd !== null || password_verify($pwd, $row['password'])) {
             $userid = $row['id'];
             $login_from = $_SERVER['REMOTE_ADDR'];
             $tokenid = uniqid();
             $time = time();
+            $user_agent = $_SERVER['HTTP_USER_AGENT'];
+
+            // Rehash legacy password
+            if($db_hashed_pwd !== null) {
+                $new_hash = password_hash($pwd, PASSWORD_DEFAULT);
+                $new_salt = null;
+
+                $stmt = $conn->prepare("UPDATE users SET password = ?, salt = ? WHERE id = ?");
+                $stmt->bind_param("ssi", $new_hash, $new_salt, $userid);
+
+                if (!$stmt->execute()) {
+                    return ['error' => "Error rehashing password. Please contact us at " . DB_MAIL];
+                }
+            }
 
             // For account deactivation (soft deletion until a certain date)
             if (!empty($row['deactive'])) {
@@ -126,9 +145,16 @@ function login_user($user, $pwd) {
             }
 
             // Create login session
-            $sql = "INSERT INTO sessions (id, login_from, user, password, timestamp) VALUES ('$tokenid', '$login_from', '$userid', '$db_hashed_pwd', '$time') LIMIT 1";
+            $sql = "INSERT INTO sessions (id, login_from, user_agent, user, password, timestamp) VALUES ('$tokenid', '$login_from', '$user_agent', '$userid', '$db_hashed_pwd', '$time') LIMIT 1";
             if (mysqli_query($conn, $sql)) {
-                setcookie('token', $tokenid, $time + (10 * 365 * 24 * 60 * 60), "/", ".gr8brik.rf.gd");
+                setcookie('token', $tokenid, [
+                    'expires' => $time + (60 * 60 * 24 * 400),
+                    'path' => '/',
+                    'domain' => '.gr8brik.rf.gd',
+                    'secure' => false,
+                    'httponly' => true,
+                    'samesite' => 'Lax'
+                ]);
                 $_SESSION['userid'] = $userid;
                 return ['success' => true];
             }
@@ -176,6 +202,8 @@ function register_user($username, $password, $email) {
             return ['error' => "Username field is blank"];
         }
     }
+    
+    $picture = 'https://profile.accounts.firefox.com/v1/avatar/' . substr($username, 0, 1);
 
     if(strlen($password) > 255) {
         header("HTTP/1.0 400 Bad Request");
@@ -191,32 +219,6 @@ function register_user($username, $password, $email) {
 
     // Prevents re-registration for banned or deactivated accounts
     // Allow list replaced with not allowed list to avoid some issues with school emails
-
-    /*$allowed_domains = array(
-        'gmail.com', 
-        'hotmail.com', 
-        'outlook.com', 
-        'live.com', 
-        'msn.com', 
-        'live.co.uk', 
-        'yahoo.com', 
-        'yahoo.co.uk', 
-        'yahoo.ca', 
-        'proton.me', 
-        'protonmail.com', 
-        'pm.me', 
-        'protonmail.ch', 
-        'apple.com', 
-        'icloud.com', 
-        'me.com', 
-        'gmx.net', 
-        'gmx.com', 
-        'mail.com', 
-        'zoho.com', 
-        'tutanota.com', 
-        'gr8brik.infinityfreeapp.com',
-        'gr8brik.rf.gd'
-    );*/
 
     $nonallowed_domains = array(
         'mailinator.com',
@@ -254,7 +256,7 @@ function register_user($username, $password, $email) {
         header("HTTP/1.0 400 Bad Request");
         return ['error' => "Username or email already in use"];
     } else {
-        $sql = "INSERT INTO users (username, password, salt, email, age, verify_token) VALUES ('$username', '$password', '$salt', '$email', '$created', '$tokenid') LIMIT 1";
+        $sql = "INSERT INTO users (username, password, salt, email, age, picture, verify_token) VALUES ('$username', '$password', '$salt', '$email', '$created', '$picture', '$tokenid') LIMIT 1";
         if (mysqli_query($conn, $sql)) {
             $sql = "SELECT id FROM users WHERE username = '$username'";
             $result = mysqli_query($conn, $sql);
@@ -264,10 +266,17 @@ function register_user($username, $password, $email) {
             $time = time();
 
             // Create session token
-            // Evan: Ten years is long enough, right?
             $sql = "INSERT INTO sessions (id, login_from, user, password, timestamp) VALUES ('$tokenid', '$login_from', '$userid', '$password', '$time') LIMIT 1";
             if (mysqli_query($conn, $sql)) {
-                setcookie('token', $tokenid, $time + (60 * 60 * 24 * 400), "/", ".gr8brik.rf.gd");
+                //setcookie('token', $tokenid, $time + (60 * 60 * 24 * 400), "/", ".gr8brik.rf.gd");
+                setcookie('token', $tokenid, [
+                    'expires' => $time + (60 * 60 * 24 * 400),
+                    'path' => '/',
+                    'domain' => '.gr8brik.rf.gd',
+                    'secure' => false,
+                    'httponly' => true,
+                    'samesite' => 'Lax'
+                ]);
                 $_SESSION['userid'] = $userid;
                 return ['success' => true];
             }

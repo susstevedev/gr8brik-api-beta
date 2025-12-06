@@ -1,14 +1,14 @@
 <?php
-//error_reporting(0);
+error_reporting(0);
 include $_SERVER['DOCUMENT_ROOT'] . '/ajax/user.php';
 include $_SERVER['DOCUMENT_ROOT'] . '/com/bbcode.php';
 include $_SERVER['DOCUMENT_ROOT'] . '/ajax/time.php';
 $bbcode = new BBCode;
 
-if(isset($_GET['follow'])) {
+if(isset($_GET['followed_by'])) {
     header('Content-Type: application/json');
     if(isset($_COOKIE['token']) && $tokendata->num_rows != 0) {
-        $profile_id = $_GET['follow'];
+        $profile_id = $_GET['followed_by'];
 
         $stmt1 = $conn->prepare("SELECT userid FROM follow WHERE profileid = ?");
         $stmt1->bind_param("s", $profile_id);
@@ -79,8 +79,12 @@ if(isset($_GET['follow'])) {
 
                         if ($result3->num_rows > 0) {
                             $followed_by[] = array(
-                                'username' => htmlspecialchars($r3['username']),
+                                'url' => '/user/' . $userid,
+                                'url_legacy' => '/user/' . htmlspecialchars($r3['username']),
                                 'userid' => $userid, 
+                                'pfp_legacy' => '/acc/users/pfps/' . $userid . '.jpg',
+                                'pfp' => $r3['picture'],
+                                'username' => htmlspecialchars($r3['username']),
                                 'random' => uniqid()
                             );
                         }
@@ -196,7 +200,7 @@ function user_blocks($profileid, $userid, $username) {
 
 function fetch_profile($profile_id, $csrf) {
     global $token, $users_row;
-    $userid = $token['user'];
+    $userid = $token['user'] ?? null;
 
     require_once $_SERVER['DOCUMENT_ROOT'] . '/com/bbcode.php';
     $bbcode = new BBCode();
@@ -211,7 +215,8 @@ function fetch_profile($profile_id, $csrf) {
     if (empty($profile_id) || $profile_id === null) {
         header("HTTP/1.0 403 Forbidden");
         return json_encode([
-            "message" => 'No user ID provided!'        
+            "message" => 'No user ID provided!',
+            "error" => 'USR_ID_NUL'
         ]);
     }
 
@@ -260,18 +265,12 @@ function fetch_profile($profile_id, $csrf) {
             ]);
         }
     }
-
-    $blockedUser = false;
-    $sql = "SELECT * FROM user_blocks WHERE userid = ? AND profileid = ? LIMIT 1";
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param("ii", $id, $profile_id);
+    
+    $stmt = $conn->prepare("SELECT COUNT(*) as blocking FROM user_blocks WHERE userid = ? AND profileid = ?");
+    $stmt->bind_param("ii", $_SESSION['userid'], $profile_id);
     $stmt->execute();
-    $result3 = $stmt->get_result();
+    $is_blocking = $stmt->get_result()->fetch_assoc()['blocking'];
     $stmt->close();
-
-    if ($result3->num_rows > 0) {
-        $blockedUser = true;
-    }
 
     $sql = "SELECT * FROM user_blocks WHERE userid = ? AND profileid = ? LIMIT 1";
     $stmt = $conn->prepare($sql);
@@ -284,26 +283,21 @@ function fetch_profile($profile_id, $csrf) {
         header("HTTP/1.0 403 Forbidden");
         return json_encode([
             "message" => htmlspecialchars($row['username']) . " has blocked you.",
-            "error" => 'ACC_BLOCKED_LOGIN_USER'
+            "error" => 'ACC_BLOCKED_USR'
         ]);
     }
     
-    if (!loggedin()) {
+    /*if (!loggedin()) {
         header("HTTP/1.0 403 Forbidden");
         return json_encode([
-            "message" => "Sign in to view " . htmlspecialchars($row['username']) . "'s creations, posts, and comments."        
+            "message" => "Sign in to view " . htmlspecialchars($row['username']) . "'s creations, posts, and comments.",
+            "error" => 'USR_SESS_NUL'
         ]);
-    }
+    }*/
 
     $conn2 = new mysqli(DB_SERVER, DB_USER, DB_PASSWORD, DB_NAME2);
     if ($conn2->connect_error) {
         exit($conn2->connect_error);
-    }
-
-    if(file_exists("../acc/users/banners/" . $profile_id . "..jpg")) {
-        $hasBanner = 1;
-    } else {
-        $hasBanner = 0;
     }
 
     $stmt = $conn2->prepare("SELECT COUNT(*) as all_models FROM model WHERE user = ?");
@@ -312,10 +306,16 @@ function fetch_profile($profile_id, $csrf) {
     $model_count = $stmt->get_result()->fetch_assoc()['all_models'];
     $stmt->close();
 
-    $stmt = $conn2->prepare("SELECT views FROM model WHERE user = ?");
+    $stmt = $conn2->prepare("SELECT SUM(views) as total_views FROM model WHERE user = ?");
     $stmt->bind_param("s", $profile_id);
     $stmt->execute();
-    $views = $stmt->get_result()->fetch_assoc()['views'];
+    $views = $stmt->get_result()->fetch_assoc()['total_views'] ?? 0;
+    $stmt->close();
+
+    $stmt = $conn2->prepare("SELECT SUM(likes) as total_likes FROM model WHERE user = ?");
+    $stmt->bind_param("s", $profile_id);
+    $stmt->execute();
+    $likes = $stmt->get_result()->fetch_assoc()['total_likes'] ?? 0;
     $stmt->close();
 
     $stmt = $conn->prepare("SELECT COUNT(*) as following FROM follow WHERE profileid = ?");
@@ -329,40 +329,43 @@ function fetch_profile($profile_id, $csrf) {
     $stmt->execute();
     $following = $stmt->get_result()->fetch_assoc()['following'];
     $stmt->close();
-
-    $stmt = $conn->prepare("SELECT * FROM follow WHERE userid = ? AND profileid = ?");
-    $stmt->bind_param("ss", $userid, $profile_id);
-    $stmt->execute();
-    $result3 = $stmt->get_result();
     
-    if($result3->num_rows === 0 || !$result3) {
-        $isFollowing = false;
+    if (loggedin()) {
+    	$stmt = $conn->prepare("SELECT COUNT(*) as following FROM follow WHERE userid = ? AND profileid = ?");
+    	$stmt->bind_param("ss", $_SESSION['userid'], $profile_id);
+    	$stmt->execute();
+    	$is_following = $stmt->get_result()->fetch_assoc()['following'];
+    	$stmt->close();
     } else {
-        $isFollowing = true;
+        $is_following = false;
     }
-    $stmt->close();
 
     if(isset($_GET['user'])) {
         header("HTTP/1.0 200 OK");
     }
+    
+    if($users_row['admin'] == '1') {
+    	$dataemail = htmlspecialchars($row['email']);
+    }
 
-    $message = "OK";
+    $message = null;
     $data = [
-        'userid' => $row['id'],
         'username' => htmlspecialchars($row['username']),
         'admin' => (string)$row['admin'],
-        'verified' => (string)$row['verified'],
         'description' => isset($row['description']) ? $bbcode->toHTML($row['description']) : '', 
         'twitter' => htmlspecialchars($row['twitter']),
+        'bsky' => htmlspecialchars($row['bsky']),
         'age' => htmlspecialchars($row['age']),
+        'picture' => htmlspecialchars($row['picture']),
         'model_count' => htmlspecialchars($model_count),
         'followers' => htmlspecialchars($followers),
         'following' => htmlspecialchars($following),
         'views' => htmlspecialchars($views),
-        'blockedUser' => (bool)$blockedUser,
-        'hasBanner' => $hasBanner,
-        'isFollowing' => (bool)$isFollowing,
-        'message' => $message
+        'likes' => htmlspecialchars($likes),
+        'blockedUser' => (bool)$is_blocking,
+        'isFollowing' => (bool)$is_following,
+        'message' => $message,
+        'email' => $dataemail ?? ''
     ];
 
     return json_encode($data);
